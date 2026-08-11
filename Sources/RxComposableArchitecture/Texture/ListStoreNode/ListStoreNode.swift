@@ -468,14 +468,25 @@ where State: Collection,
         // On iOS 26+, when the ASCollectionNode's view is force-loaded before
         // entering the hierarchy (a common pattern for crash-safety), the
         // UICollectionView may not properly trigger its layout cycle once it
-        // finally appears on screen. Force an invalidation and reload here
-        // to ensure cells are rendered.
-        if isNodeLoaded && !cellNodes.isEmpty {
-            view.collectionViewLayout.invalidateLayout()
-            view.layoutIfNeeded()
-        } else if isNodeLoaded && !items.isEmpty {
-            reloadData()
-        }
+        // finally appears on screen. Force a full reloadData here to ensure the
+        // collection view re-queries its data source and renders cells.
+        ensureCollectionViewRendered()
+    }
+    
+    public override func didEnterVisibleState() {
+        super.didEnterVisibleState()
+        // On iOS 26+, when returning from background or navigating back to a
+        // screen with a ListStoreNode, the UICollectionView may have stale
+        // internal state. Force a reload on becoming visible.
+        ensureCollectionViewRendered()
+    }
+    
+    private func ensureCollectionViewRendered() {
+        guard isNodeLoaded, !items.isEmpty else { return }
+        // Always force a full reload to ensure UICollectionView re-queries
+        // its data source. This handles both the initial load case and the
+        // return-from-background case on iOS 26+.
+        reloadData()
     }
     
     private func performUpdates(newItems: [State.Element]) {
