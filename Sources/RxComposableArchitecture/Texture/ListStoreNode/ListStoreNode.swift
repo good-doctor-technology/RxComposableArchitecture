@@ -463,6 +463,21 @@ where State: Collection,
             .disposed(by: disposeBag)
     }
     
+    public override func didEnterDisplayState() {
+        super.didEnterDisplayState()
+        // On iOS 26+, when the ASCollectionNode's view is force-loaded before
+        // entering the hierarchy (a common pattern for crash-safety), the
+        // UICollectionView may not properly trigger its layout cycle once it
+        // finally appears on screen. Force an invalidation and reload here
+        // to ensure cells are rendered.
+        if isNodeLoaded && !cellNodes.isEmpty {
+            view.collectionViewLayout.invalidateLayout()
+            view.layoutIfNeeded()
+        } else if isNodeLoaded && !items.isEmpty {
+            reloadData()
+        }
+    }
+    
     private func performUpdates(newItems: [State.Element]) {
         assertMainThread("performUpdates")
         
