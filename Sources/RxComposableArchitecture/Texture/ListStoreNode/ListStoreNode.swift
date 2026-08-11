@@ -469,24 +469,50 @@ where State: Collection,
         let oldItemsForDiffing: [AnyHashDiffable] = items.map(AnyHashDiffable.init)
         let newItemsForDiffing: [AnyHashDiffable] = newItems.map(AnyHashDiffable.init).removeDuplicates()
         
+        let updatedItems = newItemsForDiffing.compactMap { $0.base as? State.Element }
+        
+        // On iOS 26+, UICollectionView enforces stricter data source consistency
+        // during performBatchUpdates. When going from empty → populated (initial load),
+        // use reloadData instead of batch updates to avoid the timing issue where the
+        // collection view has not yet completed its initial internal reloadData.
+        if oldItemsForDiffing.isEmpty && !newItemsForDiffing.isEmpty {
+            items = updatedItems
+            reloadData()
+            return
+        }
+        
+        // For empty → empty, no-op
+        if newItemsForDiffing.isEmpty && oldItemsForDiffing.isEmpty {
+            return
+        }
+        
         let listDiff: DiffingInterfaceList.Result = DiffingInterfaceList.diffing(
             oldArray: oldItemsForDiffing,
             newArray: newItemsForDiffing
         )
         
-        items = newItemsForDiffing.compactMap { $0.base as? State.Element }
-        cellNodes = diffingCellNode(newItems: newItemsForDiffing, diff: listDiff)
-        
         let deletes: IndexSet = listDiff.deletes
         let inserts: IndexSet = listDiff.inserts
         let moves: [DiffingInterfaceList.MoveIndex] = listDiff.moves
         
+        // Compute new cell nodes before the batch update, but don't assign yet.
+        // The data source must return the old count when the collection view reads
+        // numberOfSections at the start of performBatch (iOS 26+ enforces this).
+        let updatedCellNodes = diffingCellNode(newItems: newItemsForDiffing, diff: listDiff)
+        
         performBatch(
             animated: shouldAnimateUpdate,
-            updates: {
-                deleteSections(deletes)
-                insertSections(inserts)
-                moves.forEach { moveSection($0.from, toSection: $0.to) }
+            updates: { [weak self] in
+                guard let self = self else { return }
+                // Update the backing data inside the updates block so the data source
+                // returns the correct "after" count when the collection view validates
+                // at endUpdates time.
+                self.items = updatedItems
+                self.cellNodes = updatedCellNodes
+                
+                self.deleteSections(deletes)
+                self.insertSections(inserts)
+                moves.forEach { self.moveSection($0.from, toSection: $0.to) }
             },
             completion: onDidCompleteUpdate
         )
