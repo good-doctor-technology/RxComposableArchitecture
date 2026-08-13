@@ -125,6 +125,74 @@ where State: Collection,
         
         dataSource = proxy
         style.flexGrow = 1
+
+        IOS27Debug.log(
+            component: "ListStoreNode",
+            instance: debugID,
+            event: "init",
+            fields: [
+                ("flexGrow", "\(style.flexGrow)"),
+                ("layoutClass", "\(type(of: collectionViewLayout))")
+            ]
+        )
+    }
+
+    // MARK: IOS27_LISTNODE_DEBUG (temporary)
+
+    /// Stable short id so instances can be told apart across lifecycle cycles.
+    internal lazy var debugID: String = IOS27Debug.identity(self)
+
+    deinit {
+        IOS27Debug.log(
+            component: "ListStoreNode",
+            instance: debugID,
+            event: "deinit",
+            fields: [("itemCount", "\(items.count)"), ("cellNodeCount", "\(cellNodes.count)")]
+        )
+    }
+
+    /// Snapshot of everything relevant to the zero-frame bug.
+    /// NOTE: never touches `view` unless already loaded, so it cannot itself
+    /// force view creation and change behaviour.
+    internal func debugFields(_ extra: [(String, String)] = []) -> [(String, String)] {
+        var f: [(String, String)] = []
+        f.append(("supernode", supernode == nil ? "NIL" : IOS27Debug.identity(supernode!)))
+        f.append(("isNodeLoaded", "\(isNodeLoaded)"))
+        f.append(("frame", frame.dbg))
+        f.append(("bounds", bounds.dbg))
+        f.append(("calcSize", calculatedSize.dbg))
+        f.append(("interfaceState", "\(interfaceState.rawValue)"))
+        f.append(("inHierarchy", "\(isInHierarchy)"))
+        f.append(("visible", "\(isVisible)"))
+        f.append(("flexGrow", "\(style.flexGrow)"))
+        f.append(("flexShrink", "\(style.flexShrink)"))
+        f.append(("prefSize", style.preferredSize.dbg))
+        f.append(("items", "\(items.count)"))
+        f.append(("cellNodes", "\(cellNodes.count)"))
+        f.append(("dataSourceSet", "\(dataSource != nil)"))
+
+        if isNodeLoaded, Thread.isMainThread {
+            let cv = view
+            f.append(("cv.frame", cv.frame.dbg))
+            f.append(("cv.bounds", cv.bounds.dbg))
+            f.append(("cv.contentSize", cv.contentSize.dbg))
+            f.append(("cv.superview", cv.superview == nil ? "NIL" : "\(type(of: cv.superview!))"))
+            f.append(("cv.window", cv.window == nil ? "NIL" : "set"))
+            f.append(("cv.sections", "\(cv.numberOfSections)"))
+            f.append(("cv.hidden", "\(cv.isHidden)"))
+            f.append(("cv.alpha", "\(cv.alpha)"))
+        }
+
+        return f + extra
+    }
+
+    private func debugLog(_ event: String, _ extra: [(String, String)] = []) {
+        IOS27Debug.log(
+            component: "ListStoreNode",
+            instance: debugID,
+            event: event,
+            fields: debugFields(extra)
+        )
     }
     
     /**
@@ -443,7 +511,11 @@ where State: Collection,
         
         // Set Identifier to ASCollectionView for Monitoring
         view.accessibilityIdentifier = "ListStoreNode-\(closestViewController?.description ?? "")"
-        
+
+        debugLog("didLoad", [
+            ("closestVC", closestViewController == nil ? "NIL" : "\(type(of: closestViewController!))")
+        ])
+
         store.observable
             .throttle(.milliseconds(100), scheduler: MainScheduler.instance)
             .distinctUntilChanged { lhs, rhs -> Bool in
@@ -453,7 +525,14 @@ where State: Collection,
             .asDriver { _ in .empty() }
             .drive(onNext: { [weak self] newItems in
                 guard let self = self else { return }
-                
+
+                IOS27Debug.log(
+                    component: "ListStoreNode",
+                    instance: self.debugID,
+                    event: "store.emit",
+                    fields: [("newCount", "\(newItems.count)"), ("currentItems", "\(self.items.count)")]
+                )
+
                 if let newItems = newItems as? [State.Element] {
                     self.performUpdates(newItems: newItems)
                 } else if let newItems = newItems as? IdentifiedArrayOf<State.Element> {
@@ -462,9 +541,75 @@ where State: Collection,
             })
             .disposed(by: disposeBag)
     }
+
+    // MARK: Lifecycle instrumentation (IOS27_LISTNODE_DEBUG)
+
+    public override func didEnterHierarchy() {
+        super.didEnterHierarchy()
+        debugLog("didEnterHierarchy")
+    }
+
+    public override func didExitHierarchy() {
+        super.didExitHierarchy()
+        debugLog("didExitHierarchy")
+    }
+
+    public override func interfaceStateDidChange(
+        _ newState: ASInterfaceState,
+        from oldState: ASInterfaceState
+    ) {
+        super.interfaceStateDidChange(newState, from: oldState)
+        debugLog("interfaceStateDidChange", [
+            ("from", "\(oldState.rawValue)"),
+            ("to", "\(newState.rawValue)")
+        ])
+    }
+
+    public override func didEnterPreloadState() {
+        super.didEnterPreloadState()
+        debugLog("didEnterPreloadState")
+    }
+
+    public override func didExitPreloadState() {
+        super.didExitPreloadState()
+        debugLog("didExitPreloadState")
+    }
+
+    public override func didExitVisibleState() {
+        super.didExitVisibleState()
+        debugLog("didExitVisibleState")
+    }
+
+    public override func didExitDisplayState() {
+        super.didExitDisplayState()
+        debugLog("didExitDisplayState")
+    }
+
+    public override func layout() {
+        super.layout()
+        debugLog("layout")
+    }
+
+    public override func calculateLayoutThatFits(_ constrainedSize: ASSizeRange) -> ASLayout {
+        let layout = super.calculateLayoutThatFits(constrainedSize)
+        IOS27Debug.log(
+            component: "ListStoreNode",
+            instance: debugID,
+            event: "calculateLayoutThatFits",
+            fields: [
+                ("min", constrainedSize.min.dbg),
+                ("max", constrainedSize.max.dbg),
+                ("result", layout.size.dbg),
+                ("flexGrow", "\(style.flexGrow)"),
+                ("flexShrink", "\(style.flexShrink)")
+            ]
+        )
+        return layout
+    }
     
     public override func didEnterDisplayState() {
         super.didEnterDisplayState()
+        debugLog("didEnterDisplayState")
         // On iOS 26+, when the ASCollectionNode's view is force-loaded before
         // entering the hierarchy (a common pattern for crash-safety), the
         // UICollectionView may not properly trigger its layout cycle once it
@@ -475,6 +620,7 @@ where State: Collection,
     
     public override func didEnterVisibleState() {
         super.didEnterVisibleState()
+        debugLog("didEnterVisibleState")
         // On iOS 26+, when returning from background or navigating back to a
         // screen with a ListStoreNode, the UICollectionView may have stale
         // internal state. Force a reload on becoming visible.
@@ -482,10 +628,16 @@ where State: Collection,
     }
     
     private func ensureCollectionViewRendered() {
-        guard isNodeLoaded, !items.isEmpty else { return }
+        guard isNodeLoaded, !items.isEmpty else {
+            debugLog("ensureCollectionViewRendered.SKIPPED", [
+                ("reason", !isNodeLoaded ? "nodeNotLoaded" : "itemsEmpty")
+            ])
+            return
+        }
         // Always force a full reload to ensure UICollectionView re-queries
         // its data source. This handles both the initial load case and the
         // return-from-background case on iOS 26+.
+        debugLog("ensureCollectionViewRendered.WILL_RELOAD")
         reloadData()
     }
     
@@ -496,19 +648,26 @@ where State: Collection,
         let newItemsForDiffing: [AnyHashDiffable] = newItems.map(AnyHashDiffable.init).removeDuplicates()
         
         let updatedItems = newItemsForDiffing.compactMap { $0.base as? State.Element }
-        
+
+        debugLog("performUpdates.enter", [
+            ("oldCount", "\(oldItemsForDiffing.count)"),
+            ("newCount", "\(newItemsForDiffing.count)")
+        ])
+
         // On iOS 26+, UICollectionView enforces stricter data source consistency
         // during performBatchUpdates. When going from empty → populated (initial load),
         // use reloadData instead of batch updates to avoid the timing issue where the
         // collection view has not yet completed its initial internal reloadData.
         if oldItemsForDiffing.isEmpty && !newItemsForDiffing.isEmpty {
             items = updatedItems
+            debugLog("performUpdates.branch=EMPTY_TO_POPULATED_reloadData")
             reloadData()
             return
         }
         
         // For empty → empty, no-op
         if newItemsForDiffing.isEmpty && oldItemsForDiffing.isEmpty {
+            debugLog("performUpdates.branch=EMPTY_TO_EMPTY_noop")
             return
         }
         
@@ -609,7 +768,9 @@ where State: Collection,
     
     public override func reloadData() {
         assertMainThread("reloadData")
-        
+
+        let previousCellNodeIDs = cellNodes.map { IOS27Debug.identity($0) }.joined(separator: ",")
+
         cellNodes = items
             .compactMap { [id] item -> Store<State.Element, Action>? in
                 store.scope(
@@ -620,9 +781,18 @@ where State: Collection,
                 )
             }
             .map(createCellNode)
-        
+
+        let newCellNodeIDs = cellNodes.map { IOS27Debug.identity($0) }.joined(separator: ",")
+
+        debugLog("reloadData.RECREATED_CELL_NODES", [
+            ("oldCellNodeIDs", previousCellNodeIDs.isEmpty ? "none" : previousCellNodeIDs),
+            ("newCellNodeIDs", newCellNodeIDs.isEmpty ? "none" : newCellNodeIDs)
+        ])
+
         super.reloadData()
         view.collectionViewLayout.invalidateLayout()
+
+        debugLog("reloadData.AFTER_INVALIDATE")
     }
     
     /**
@@ -658,8 +828,23 @@ where State: Collection,
     // MARK: Collection Data Sources
     
     fileprivate func numberOfSections(in _: ASCollectionNode) -> Int {
-        guard let listStoreNode = listStoreNode else { return 0 }
-        return listStoreNode.cellNodes.count
+        guard let listStoreNode = listStoreNode else {
+            IOS27Debug.log(
+                component: "ListStoreNodeProxy",
+                instance: "-",
+                event: "numberOfSections.NODE_DEALLOCATED",
+                fields: [("returned", "0")]
+            )
+            return 0
+        }
+        let count = listStoreNode.cellNodes.count
+        IOS27Debug.log(
+            component: "ListStoreNodeProxy",
+            instance: listStoreNode.debugID,
+            event: "numberOfSections",
+            fields: [("returned", "\(count)"), ("items", "\(listStoreNode.items.count)")]
+        )
+        return count
     }
     
     fileprivate func collectionNode(_: ASCollectionNode, numberOfItemsInSection _: Int) -> Int {
@@ -667,6 +852,17 @@ where State: Collection,
     }
     
     fileprivate func collectionNode(_: ASCollectionNode, nodeForItemAt indexPath: IndexPath) -> ASCellNode {
-        listStoreNode?.cellNodes[safe: indexPath.section] ?? .emptyCell
+        let node = listStoreNode?.cellNodes[safe: indexPath.section]
+        IOS27Debug.log(
+            component: "ListStoreNodeProxy",
+            instance: listStoreNode?.debugID ?? "-",
+            event: "nodeForItemAt",
+            fields: [
+                ("section", "\(indexPath.section)"),
+                ("found", node == nil ? "NO->emptyCell" : "YES"),
+                ("cellNodeID", node.map { IOS27Debug.identity($0) } ?? "-")
+            ]
+        )
+        return node ?? .emptyCell
     }
 }
