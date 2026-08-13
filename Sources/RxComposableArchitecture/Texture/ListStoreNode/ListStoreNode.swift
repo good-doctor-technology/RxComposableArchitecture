@@ -125,6 +125,7 @@ where State: Collection,
         
         dataSource = proxy
         style.flexGrow = 1
+        style.flexShrink = 1
     }
     
     /**
