@@ -47,16 +47,22 @@ public enum IOS27Debug {
 
 extension CGRect {
     public var dbg: String {
-        "(\(Int(origin.x)),\(Int(origin.y)) \(Int(width))x\(Int(height)))"
+        func s(_ v: CGFloat) -> String { v.isNaN || v.isInfinite ? "INF" : "\(Int(v))" }
+        return "(\(s(origin.x)),\(s(origin.y)) \(s(width))x\(s(height)))"
     }
 }
 
 extension CGSize {
-    public var dbg: String { "\(Int(width))x\(Int(height))" }
+    public var dbg: String {
+        let w = width.isNaN || width.isInfinite ? "INF" : "\(Int(width))"
+        let h = height.isNaN || height.isInfinite ? "INF" : "\(Int(height))"
+        return "\(w)x\(h)"
+    }
 }
 
 extension UIEdgeInsets {
     public var dbg: String {
-        "t\(Int(top))/l\(Int(left))/b\(Int(bottom))/r\(Int(right))"
+        func s(_ v: CGFloat) -> String { v.isNaN || v.isInfinite ? "INF" : "\(Int(v))" }
+        return "t\(s(top))/l\(s(left))/b\(s(bottom))/r\(s(right))"
     }
 }
