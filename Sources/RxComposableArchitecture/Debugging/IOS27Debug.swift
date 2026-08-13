@@ -46,17 +46,17 @@ public enum IOS27Debug {
 }
 
 extension CGRect {
-    internal var dbg: String {
+    public var dbg: String {
         "(\(Int(origin.x)),\(Int(origin.y)) \(Int(width))x\(Int(height)))"
     }
 }
 
 extension CGSize {
-    internal var dbg: String { "\(Int(width))x\(Int(height))" }
+    public var dbg: String { "\(Int(width))x\(Int(height))" }
 }
 
 extension UIEdgeInsets {
-    internal var dbg: String {
+    public var dbg: String {
         "t\(Int(top))/l\(Int(left))/b\(Int(bottom))/r\(Int(right))"
     }
 }

@@ -140,7 +140,7 @@ where State: Collection,
     // MARK: IOS27_LISTNODE_DEBUG (temporary)
 
     /// Stable short id so instances can be told apart across lifecycle cycles.
-    internal lazy var debugID: String = IOS27Debug.identity(self)
+    public lazy var debugID: String = IOS27Debug.identity(self)
 
     deinit {
         IOS27Debug.log(
