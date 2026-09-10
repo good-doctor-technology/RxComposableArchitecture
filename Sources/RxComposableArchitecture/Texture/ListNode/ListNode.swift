@@ -67,6 +67,22 @@ public class ListNode<Item: HashDiffable & Equatable>: ASCollectionNode, ListNod
         animated: Bool,
         completion: ((Bool) -> Void)? = nil
     ) {
+        // On iOS 26+, UICollectionView enforces stricter data source consistency
+        // during performBatchUpdates. When going from empty -> populated (initial
+        // load), issuing `insertSections` as a batch update crashes with
+        // `recursive_mutex lock failed: Invalid argument` inside Texture's
+        // ASDataController, because the collection view has not yet completed its
+        // initial internal reloadData. Use a full reloadData for that first
+        // transition instead. This mirrors the fix already applied to ListStoreNode.
+        if items.isEmpty, !newItems.isEmpty {
+            // Update backing items (also removes duplicates in release builds), then
+            // reloadData() rebuilds `listCellNodes` from `items` on the main thread.
+            _ = getDiffAfterItemsUpdate(newItems: newItems)
+            reloadData()
+            completion?(true)
+            return
+        }
+
         let listDiff: DiffingInterfaceList.Result = getDiffAfterItemsUpdate(newItems: newItems)
         
         guard listDiff.hasChanges else { return }
