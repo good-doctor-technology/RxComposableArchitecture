@@ -512,6 +512,15 @@ where State: Collection,
         if newItemsForDiffing.isEmpty && oldItemsForDiffing.isEmpty {
             return
         }
+
+        // The diff is calculated from `items`, so the cached cell nodes must have
+        // the same count before applying a batch update. If the cache is stale,
+        // rebuilding it is safer than applying deletes against invalid indexes.
+        if cellNodes.count != oldItemsForDiffing.count {
+            items = updatedItems
+            reloadData()
+            return
+        }
         
         let listDiff: DiffingInterfaceList.Result = DiffingInterfaceList.diffing(
             oldArray: oldItemsForDiffing,
@@ -558,6 +567,7 @@ where State: Collection,
         var copyCellNodes = cellNodes
         
         diff.deletes.sorted(by: >).forEach { index in
+            guard copyCellNodes.indices.contains(index) else { return }
             copyCellNodes.remove(at: index)
         }
         
