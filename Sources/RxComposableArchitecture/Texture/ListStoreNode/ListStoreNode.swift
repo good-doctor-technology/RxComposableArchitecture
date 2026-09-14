@@ -621,7 +621,12 @@ where State: Collection,
     public override func reloadData() {
         assertMainThread("reloadData")
         
-        cellNodes = items
+        // A reload can happen while the throttled store emission is pending. Rebuild
+        // both caches from the current store snapshot so deleted identifiers cannot
+        // leave cellNodes shorter than the data-source state.
+        let currentItems: [State.Element] = Array(store.state).removeDuplicates()
+        items = currentItems
+        cellNodes = currentItems
             .compactMap { [id] item -> Store<State.Element, Action>? in
                 store.scope(
                     at: item[keyPath: id],
