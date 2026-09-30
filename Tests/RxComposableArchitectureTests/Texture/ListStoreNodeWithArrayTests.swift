@@ -113,6 +113,41 @@ internal final class ListStoreNodeWithArrayTests: XCTestCase {
         XCTAssertEqual(expectedChanges, actualChanges)
     }
 
+    internal func test_reloadData_tracksCurrentStoreState_duringPendingThrottleUpdate() {
+        let parentStore = Store(
+            initialState: AppState(childs: [
+                ChildState(id: 0, count: 0),
+                ChildState(id: 1, count: 0)
+            ]),
+            reducer: appReducer,
+            environment: ()
+        )
+        let listStore = ListStoreNode(
+            store: parentStore.scope(
+                state: \.childs,
+                action: AppAction.child(identifier:action:)
+            ),
+            collectionViewLayout: UICollectionViewFlowLayout(),
+            content: ChildNode.init
+        )
+        let appliedChild = ChildState(id: 2, count: 0)
+        let latestChild = ChildState(id: 3, count: 0)
+
+        _ = listStore.view
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+
+        parentStore.send(.replaceChilds([appliedChild]))
+        parentStore.send(.replaceChilds([latestChild]))
+        listStore.reloadData()
+
+        XCTAssertEqual(listStore.items, [latestChild])
+        XCTAssertEqual(listStore.cellNodes.count, listStore.items.count)
+
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        XCTAssertEqual(listStore.items, [latestChild])
+        XCTAssertEqual(listStore.cellNodes.count, listStore.items.count)
+    }
+
     internal func test_redux_measurePerformance() {
         let childs = [
             ChildState(id: 0, count: 0),

@@ -484,32 +484,76 @@ where State: Collection,
     
     private func ensureCollectionViewRendered() {
         guard isNodeLoaded, !items.isEmpty else { return }
+        // If a batch update is still committing, a reloadData here would mutate
+        // `cellNodes` out from under the in-flight batch and desync the section
+        // count (the collection view records "before"/"after" counts around
+        // `performBatchUpdates`; changing them mid-flight throws
+        // `NSInternalInconsistencyException: invalid number of sections`).
+        // Defer the reload until the batch completes.
+        guard !isBatchInFlight else {
+            needsReloadAfterBatch = true
+            return
+        }
         // Always force a full reload to ensure UICollectionView re-queries
         // its data source. This handles both the initial load case and the
         // return-from-background case on iOS 26+.
         reloadData()
     }
     
+    /// True while a `performBatch` has begun but its completion has not yet fired.
+    /// Batch updates must never overlap: starting a new batch or a `reloadData`
+    /// while one is in flight leaves `cellNodes` and the collection view's internal
+    /// section bookkeeping inconsistent, which crashes at the next `endUpdates`.
+    private var isBatchInFlight: Bool = false
+    /// Latest items received while a batch was in flight, to be applied on completion.
+    private var pendingItems: [State.Element]?
+    /// Set when a `reloadData` was requested during an in-flight batch.
+    private var needsReloadAfterBatch: Bool = false
+    
     private func performUpdates(newItems: [State.Element]) {
         assertMainThread("performUpdates")
         
-        let oldItemsForDiffing: [AnyHashDiffable] = items.map(AnyHashDiffable.init)
+        // Serialize against any in-flight batch. Applying a diff computed against
+        // the current `cellNodes` while a previous batch is still committing races
+        // with the collection view's internal update and desyncs section counts.
+        // Coalesce to the latest items and apply once the current batch finishes.
+        guard !isBatchInFlight else {
+            pendingItems = newItems
+            return
+        }
+        
+        let oldItemsForDiffing: [AnyHashDiffable] = items.map(AnyHashDiffable.init).removeDuplicates()
         let newItemsForDiffing: [AnyHashDiffable] = newItems.map(AnyHashDiffable.init).removeDuplicates()
         
         let updatedItems = newItemsForDiffing.compactMap { $0.base as? State.Element }
         
-        // On iOS 26+, UICollectionView enforces stricter data source consistency
-        // during performBatchUpdates. When going from empty → populated (initial load),
-        // use reloadData instead of batch updates to avoid the timing issue where the
-        // collection view has not yet completed its initial internal reloadData.
+        // Going from empty → populated (initial load): use reloadData instead of a
+        // batch update to avoid the timing issue where the collection view has not
+        // yet completed its initial internal reloadData.
         if oldItemsForDiffing.isEmpty && !newItemsForDiffing.isEmpty {
             items = updatedItems
             reloadData()
             return
         }
         
-        // For empty → empty, no-op
+        // For empty → empty, no-op.
         if newItemsForDiffing.isEmpty && oldItemsForDiffing.isEmpty {
+            return
+        }
+        
+        // If everything was removed, reload rather than delete-all via batch.
+        if newItemsForDiffing.isEmpty {
+            items = updatedItems
+            reloadData()
+            return
+        }
+
+        // The diff is calculated from `items`, so the cached cell nodes must have
+        // the same count before applying a batch update. If the cache is stale,
+        // rebuilding it is safer than applying deletes against invalid indexes.
+        if cellNodes.count != oldItemsForDiffing.count {
+            items = updatedItems
+            reloadData()
             return
         }
         
@@ -522,11 +566,24 @@ where State: Collection,
         let inserts: IndexSet = listDiff.inserts
         let moves: [DiffingInterfaceList.MoveIndex] = listDiff.moves
         
-        // Compute new cell nodes before the batch update, but don't assign yet.
-        // The data source must return the old count when the collection view reads
-        // numberOfSections at the start of performBatch (iOS 26+ enforces this).
         let updatedCellNodes = diffingCellNode(newItems: newItemsForDiffing, diff: listDiff)
         
+        // Final safety net: the section-count invariant the collection view enforces.
+        // If the computed "after" count does not match before + inserts − deletes,
+        // applying it as a batch would crash. Fall back to a full reload.
+        let expectedAfter = cellNodes.count + inserts.count - deletes.count
+        if updatedCellNodes.count != expectedAfter {
+            items = updatedItems
+            reloadData()
+            return
+        }
+        
+        isBatchInFlight = true
+        // Watchdog: if the completion is ever dropped (e.g. the collection view
+        // discards it, or an update interrupts the batch and its completion never
+        // fires), a stuck `isBatchInFlight` would freeze every future update. Reset
+        // defensively on the next runloop turns if the completion has not cleared it.
+        scheduleBatchWatchdog()
         performBatch(
             animated: shouldAnimateUpdate,
             updates: { [weak self] in
@@ -541,8 +598,59 @@ where State: Collection,
                 self.insertSections(inserts)
                 moves.forEach { self.moveSection($0.from, toSection: $0.to) }
             },
-            completion: onDidCompleteUpdate
+            completion: { [weak self] finished in
+                guard let self = self else { return }
+                self.batchGeneration &+= 1 // invalidate the pending watchdog
+                self.isBatchInFlight = false
+                self.onDidCompleteUpdate(finished)
+                // Drain asynchronously so a synchronously-firing completion cannot
+                // recurse performUpdates -> completion -> drain within the same frame.
+                DispatchQueue.main.async { [weak self] in
+                    self?.drainPendingWork()
+                }
+            }
         )
+    }
+    
+    /// Monotonic token identifying the current in-flight batch. Bumped on completion
+    /// (and by the watchdog) so a stale watchdog cannot clear a newer batch's flag.
+    private var batchGeneration: Int = 0
+    
+    /// Recovers from a dropped `performBatch` completion. If the batch that was in
+    /// flight when scheduled is still marked in flight after a grace period, force
+    /// the flag down and drain any deferred work so the list cannot wedge forever.
+    private func scheduleBatchWatchdog() {
+        batchGeneration &+= 1
+        let generation = batchGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self = self else { return }
+            // A newer batch started or the completion fired -> nothing to recover.
+            guard self.isBatchInFlight, self.batchGeneration == generation else { return }
+            self.isBatchInFlight = false
+            self.drainPendingWork()
+        }
+    }
+    
+    /// Applies any update/reload that arrived while a batch was in flight. Called
+    /// once from the batch completion so deferred work runs against a settled
+    /// collection view instead of racing the previous batch.
+    private func drainPendingWork() {
+        assertMainThread("drainPendingWork")
+        // If a new batch started between completion and this async drain, wait for
+        // that batch's own completion to drain instead.
+        guard !isBatchInFlight else { return }
+        
+        if let pending = pendingItems {
+            pendingItems = nil
+            needsReloadAfterBatch = false
+            performUpdates(newItems: pending)
+            return
+        }
+        
+        if needsReloadAfterBatch {
+            needsReloadAfterBatch = false
+            reloadData()
+        }
     }
     
     private func diffingCellNode(newItems: [AnyHashDiffable], diff: DiffingInterfaceList.Result) -> [ListStoreCellNode] {
@@ -558,6 +666,7 @@ where State: Collection,
         var copyCellNodes = cellNodes
         
         diff.deletes.sorted(by: >).forEach { index in
+            guard copyCellNodes.indices.contains(index) else { return }
             copyCellNodes.remove(at: index)
         }
         
@@ -611,7 +720,20 @@ where State: Collection,
     public override func reloadData() {
         assertMainThread("reloadData")
         
-        cellNodes = items
+        // If a batch update is committing, defer the reload. Mutating `cellNodes`
+        // here would desync the collection view's section bookkeeping and crash at
+        // the batch's `endUpdates`. The pending reload is drained on batch completion.
+        guard !isBatchInFlight else {
+            needsReloadAfterBatch = true
+            return
+        }
+        
+        // A reload can happen while the throttled store emission is pending. Rebuild
+        // both caches from the current store snapshot so deleted identifiers cannot
+        // leave cellNodes shorter than the data-source state.
+        let currentItems: [State.Element] = Array(store.state).removeDuplicates()
+        items = currentItems
+        cellNodes = currentItems
             .compactMap { [id] item -> Store<State.Element, Action>? in
                 store.scope(
                     at: item[keyPath: id],
