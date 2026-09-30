@@ -579,6 +579,11 @@ where State: Collection,
         }
         
         isBatchInFlight = true
+        // Watchdog: if the completion is ever dropped (e.g. the collection view
+        // discards it, or an update interrupts the batch and its completion never
+        // fires), a stuck `isBatchInFlight` would freeze every future update. Reset
+        // defensively on the next runloop turns if the completion has not cleared it.
+        scheduleBatchWatchdog()
         performBatch(
             animated: shouldAnimateUpdate,
             updates: { [weak self] in
@@ -595,11 +600,35 @@ where State: Collection,
             },
             completion: { [weak self] finished in
                 guard let self = self else { return }
+                self.batchGeneration &+= 1 // invalidate the pending watchdog
                 self.isBatchInFlight = false
                 self.onDidCompleteUpdate(finished)
-                self.drainPendingWork()
+                // Drain asynchronously so a synchronously-firing completion cannot
+                // recurse performUpdates -> completion -> drain within the same frame.
+                DispatchQueue.main.async { [weak self] in
+                    self?.drainPendingWork()
+                }
             }
         )
+    }
+    
+    /// Monotonic token identifying the current in-flight batch. Bumped on completion
+    /// (and by the watchdog) so a stale watchdog cannot clear a newer batch's flag.
+    private var batchGeneration: Int = 0
+    
+    /// Recovers from a dropped `performBatch` completion. If the batch that was in
+    /// flight when scheduled is still marked in flight after a grace period, force
+    /// the flag down and drain any deferred work so the list cannot wedge forever.
+    private func scheduleBatchWatchdog() {
+        batchGeneration &+= 1
+        let generation = batchGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self = self else { return }
+            // A newer batch started or the completion fired -> nothing to recover.
+            guard self.isBatchInFlight, self.batchGeneration == generation else { return }
+            self.isBatchInFlight = false
+            self.drainPendingWork()
+        }
     }
     
     /// Applies any update/reload that arrived while a batch was in flight. Called
@@ -607,6 +636,9 @@ where State: Collection,
     /// collection view instead of racing the previous batch.
     private func drainPendingWork() {
         assertMainThread("drainPendingWork")
+        // If a new batch started between completion and this async drain, wait for
+        // that batch's own completion to drain instead.
+        guard !isBatchInFlight else { return }
         
         if let pending = pendingItems {
             pendingItems = nil
